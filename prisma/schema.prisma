@@ -1,0 +1,39 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model SimRun {
+  id            String       @id
+  scenario      String
+  callerType    String       @default("user")
+  callerId      String       @default("")
+  n             Int
+  profileType   String
+  profileConfig String       @default("{}")
+  status        String       @default("pending")
+  aggregation   String       @default("{}")
+  totalTokens   Int          @default(0)
+  durationMs    Int          @default(0)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  personas      SimPersona[]
+}
+
+model SimPersona {
+  id         Int     @id @default(autoincrement())
+  simRunId   String
+  simRun     SimRun  @relation(fields: [simRunId], references: [id], onDelete: Cascade)
+  index      Int
+  profile    String
+  response   String  @default("")
+  sentiment  String  @default("")
+  keyPoints  String  @default("[]")
+  tokens     Int     @default(0)
+  durationMs Int     @default(0)
+  error      String  @default("")
+}
