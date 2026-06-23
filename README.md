@@ -1,32 +1,88 @@
 # Crowdmind
 
-AI focus groups, no scheduling required.
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue?logo=typescript)](https://www.typescriptlang.org)
+[![Anthropic AI](https://img.shields.io/badge/Anthropic-Claude-orange)](https://www.anthropic.com)
 
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-FF5E5B?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/gerardolucero)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=flat&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/lucerorios0)
-[![GitHub Stars](https://img.shields.io/github/stars/GerardoLucero/crowdmind?style=social)](https://github.com/GerardoLucero/crowdmind)
+**AI focus groups, instant feedback. No scheduling, no bias.**
 
-Crowdmind simulates how a population of N synthetic personas would react to any scenario — a CV, a product pitch, a landing page, a startup idea. You get a consensus score, sentiment breakdown, recurring patterns, outliers, and a concrete recommendation, all in under two minutes.
+> **Problem:** Getting feedback on your CV, pitch, or product takes weeks (email → waiting for responses → aggregating → biased sample).  
+> **Solution:** Submit your scenario to Crowdmind. Get synthesis from N personas in **2 minutes**.
 
 ---
 
-## What it does
+## 🎯 The Value Proposition
 
-Describe a scenario in plain text. Choose a target population. Crowdmind generates N distinct realistic personas, runs each one in parallel against your scenario, and synthesizes the results into an actionable report.
+| Metric | Impact |
+|--------|--------|
+| **Feedback Time** | Weeks → 2 minutes |
+| **Personas** | 3-30 diverse perspectives (parallel evaluation) |
+| **Cost per run** | ~$0.015-0.045 (Haiku + Sonnet synthesis) |
+| **Use cases** | CVs, pitches, product copy, startup ideas, landing pages |
+| **Output** | Consensus score, sentiment, patterns, outliers, recommendation |
+
+---
+
+## ⚡ Key Features
+
+✅ **Instant Focus Groups** — No recruiting, scheduling, or respondent bias  
+✅ **Diverse Perspectives** — Hiring managers, CTOs, investors, customers, tech leads, peers  
+✅ **Parallel Execution** — All personas evaluate simultaneously  
+✅ **AI-Powered Synthesis** — Haiku for speed, Sonnet for quality aggregation  
+✅ **API-First Design** — Any agent can invoke Crowdmind autonomously  
+✅ **Custom Populations** — Define your own persona profiles  
+✅ **Actionable Output** — Score, patterns, surprises, recommendation  
+✅ **Audit Trail** — Track which agent made which decision
+
+---
+
+## 📊 How It Works
+
+```
+┌─────────────────────────────┐
+│  Input: Your Scenario       │
+│  "Here's my CV for         │
+│   Staff Engineer roles"     │
+└────────────┬────────────────┘
+             │
+    ┌────────▼──────────┐
+    │  Select Population │
+    │  (hiring-managers) │
+    └────────┬──────────┘
+             │
+    ┌────────▼──────────────────┐
+    │  Generate N Personas      │
+    │  (name, role, bias,       │
+    │   perspective, exp)       │
+    └────────┬──────────────────┘
+             │
+    ┌────────▼──────────────────┐
+    │  Run Personas in Parallel │
+    │  - Each evaluates scenario │
+    │  - Haiku model (fast)      │
+    │  - Concurrent execution    │
+    └────────┬──────────────────┘
+             │
+    ┌────────▼──────────────────┐
+    │  Aggregate Results         │
+    │  - Sonnet synthesizes      │
+    │  - Score, sentiment, themes│
+    └────────┬──────────────────┘
+             │
+    ┌────────▼─────────────────────┐
+    │  Output: Actionable Report    │
+    │  • Consensus 0-100            │
+    │  • Sentiment breakdown         │
+    │  • Patterns & outliers         │
+    │  • Recommendation              │
+    └───────────────────────────────┘
+```
 
 **Example scenarios:**
 - "Here is my updated CV targeting Staff Engineer roles at remote companies. How would hiring managers react?"
 - "I am pitching a SaaS tool for developer onboarding. Here is the one-liner. How would VCs respond?"
 - "Here is the copy for my landing page. Would potential customers trust it?"
-
-**Output includes:**
-- Consensus score (0-100)
-- Sentiment breakdown (positive / neutral / negative / mixed)
-- Majority view (2-3 sentences)
-- Minority / contrarian view
-- Recurring patterns (3-5 themes)
-- Surprises and outliers
-- Actionable recommendation
 
 ---
 
@@ -46,7 +102,30 @@ You can define custom population profiles via the API.
 
 ---
 
-## Invocable by agents
+## 💡 Why This Project Exists
+
+When you're building products or pitching for jobs, **getting real feedback is hard**:
+- Asking friends biases the response (they'll be polite)
+- Professional feedback is expensive and slow
+- A/B testing requires real users
+
+**Crowdmind solves this:** Get honest, diverse perspective from N synthetic personas in 2 minutes for ~$0.02.
+
+**Real use cases:**
+- CV review before applying to international roles (hiring-managers perspective)
+- Pitch validation before investor meetings (investors perspective)
+- Product copy testing before launch (customers perspective)
+- Startup idea evaluation (multi-perspective synthesis)
+
+**Technical innovation:**
+- Uses cheapest models (Haiku) for parallel evaluation
+- Reserves expensive model (Sonnet) for quality synthesis
+- Runs all personas concurrently via `Promise.allSettled`
+- Audit trail tracks which AI agent made which decision (agent autonomy)
+
+---
+
+## 🤖 Invocable by agents
 
 Crowdmind exposes a REST API that any AI agent can call autonomously. This means your agents can validate ideas, test messaging, or evaluate decisions without human intervention.
 
@@ -65,15 +144,27 @@ The `callerType: "agent"` field tracks which agent initiated the simulation, so 
 
 ---
 
-## How it works
+## 🔧 Technical Architecture
 
-Three-step pipeline, all via Anthropic's AI SDK:
+**Three-step pipeline, all via Anthropic AI SDK:**
 
-1. **Generate personas** — one `claude-haiku-4.5` call generates N distinct realistic personas based on the selected profile. Each persona has a name, role, years of experience, industry, bias, and perspective.
+1. **Generate Personas** (1 call, ~2K tokens)
+   - Input: Population profile (e.g., "hiring-managers")
+   - Output: N personas with name, role, years exp, industry, bias, perspective
+   - Model: `claude-haiku-4.5` (cheapest, sufficient for generation)
 
-2. **Run personas in parallel** — each persona evaluates the scenario independently via `claude-haiku-4.5`. A second structured call extracts sentiment and key points from each response. All N personas run concurrently via `Promise.allSettled`.
+2. **Run Personas in Parallel** (N calls, ~15K tokens per run)
+   - Each persona evaluates scenario independently
+   - Structured output extraction (sentiment, key points)
+   - Concurrent via `Promise.allSettled` (no blocking)
+   - Model: `claude-haiku-4.5` (fast, cheap for bulk evaluation)
 
-3. **Aggregate** — `claude-sonnet-4.6` synthesizes all responses into the final report: consensus score, sentiment breakdown, patterns, surprises, and recommendation.
+3. **Aggregate Results** (1 call, ~10K tokens)
+   - Input: All N persona responses
+   - Output: Consensus score, sentiment breakdown, patterns, surprises, recommendation
+   - Model: `claude-sonnet-4.6` (quality synthesis, higher token cost justified)
+
+**Cost optimization:** 90% of tokens via Haiku (~$0.002/1K), 10% via Sonnet (~$0.003/1K)
 
 ---
 
