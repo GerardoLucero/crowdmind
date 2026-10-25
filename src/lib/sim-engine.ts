@@ -1,22 +1,28 @@
-import { anthropic } from '@ai-sdk/anthropic'
-import { generateText } from 'ai'
+import { z } from 'zod'
+import { ModelProvider } from './model-provider'
+import { fence } from './fence'
+
+const model = new ModelProvider()
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-export interface PersonaProfile {
-  name: string
-  role: string
-  yearsExperience: number
-  industry: string
-  bias: string
-  perspective: string
-}
+export const PersonaProfileSchema = z.object({
+  name: z.string().max(80),
+  role: z.string().max(120),
+  yearsExperience: z.number(),
+  industry: z.string().max(80),
+  bias: z.string().max(240),
+  perspective: z.string().max(240),
+})
+export type PersonaProfile = z.infer<typeof PersonaProfileSchema>
+
+export type Sentiment = 'positive' | 'neutral' | 'negative' | 'mixed'
 
 export interface PersonaResult {
   index: number
   profile: PersonaProfile
   response: string
-  sentiment: 'positive' | 'neutral' | 'negative' | 'mixed'
+  sentiment: Sentiment
   keyPoints: string[]
   tokens: number
   durationMs: number
@@ -31,9 +37,18 @@ export interface AggregationResult {
   topPatterns: string[]
   surprises: string[]
   recommendation: string
+  /** True when the synthesis step failed and only the sentiment numbers are real. */
+  degraded?: boolean
 }
 
-export const PROFILE_PRESETS: Record<string, { role: string; experience: string; industry: string; bias: string }> = {
+export interface ProfileConfig {
+  role: string
+  experience: string
+  industry: string
+  bias: string
+}
+
+export const PROFILE_PRESETS: Record<string, ProfileConfig> = {
   'hiring-managers': {
     role: 'Hiring Manager or Technical Recruiter',
     experience: '3-12 years in talent acquisition or engineering management',
@@ -46,31 +61,31 @@ export const PROFILE_PRESETS: Record<string, { role: string; experience: string;
     industry: 'Mix of Fintech, SaaS, Startups, Enterprise Tech',
     bias: 'Technical depth, architecture decisions, team dynamics',
   },
-  'ctors': {
+  ctors: {
     role: 'CTO or VP Engineering',
     experience: '8-20 years, last 3-5 in leadership',
     industry: 'Mix of Startups Series A-C, Scale-ups, Enterprise',
     bias: 'Business impact, technical strategy, team building, cost management',
   },
-  'recruiters': {
+  recruiters: {
     role: 'Technical Recruiter or Talent Partner',
     experience: '2-10 years in technical recruiting',
     industry: 'Mix of agencies, internal recruiting at tech companies',
     bias: 'Market fit, compensation benchmarks, candidate positioning',
   },
-  'peers': {
+  peers: {
     role: 'Senior Software Engineer or Solutions Architect',
     experience: '5-12 years in software engineering',
     industry: 'Mix of Fintech, SaaS, Cloud, DevOps',
     bias: 'Technical credibility, real-world problem solving, collaboration',
   },
-  'investors': {
+  investors: {
     role: 'Angel Investor or VC Partner',
     experience: '5-15 years investing in early-stage tech companies',
     industry: 'Mix of SaaS, Fintech, Dev Tools, AI/ML',
     bias: 'Market size, team credibility, defensibility, go-to-market',
   },
-  'customers': {
+  customers: {
     role: 'Potential Customer or End User',
     experience: '2-10 years using SaaS products in their domain',
     industry: 'Mix of SMB and Enterprise buyers',
@@ -78,202 +93,157 @@ export const PROFILE_PRESETS: Record<string, { role: string; experience: string;
   },
 }
 
-// ─── Step 1: Generate N distinct personas in one LLM call ──────────────────
+// ─── Step 1: Generate N distinct personas in one call ───────────────────────
 
-export async function generatePersonas(
-  n: number,
-  profileConfig: { role: string; experience: string; industry: string; bias: string }
-): Promise<PersonaProfile[]> {
-  const { text } = await generateText({
-    model: anthropic('claude-haiku-4.5'),
-    system: 'You are a persona generation engine. Return only valid JSON arrays, no markdown.',
-    prompt: `Generate exactly ${n} distinct realistic personas for the following profile.
+export async function generatePersonas(n: number, profile: ProfileConfig): Promise<PersonaProfile[]> {
+  try {
+    const { data } = await model.generateJson(
+      {
+        systemPrompt: 'You are a persona generation engine.',
+        messages: [
+          {
+            role: 'user',
+            content: `Generate exactly ${n} distinct realistic personas for the following profile.
 
 PROFILE:
-Role: ${profileConfig.role}
-Experience: ${profileConfig.experience}
-Industry: ${profileConfig.industry}
-Bias/Context: ${profileConfig.bias}
+Role: ${profile.role}
+Experience: ${profile.experience}
+Industry: ${profile.industry}
+Bias/Context: ${profile.bias}
 
 Rules:
 - Each persona must be unique (different name, background, industry, perspective)
-- Make them realistic and varied — different seniorities, company types, geographies
+- Different seniorities, company types and geographies; international names
 - Include both optimistic and skeptical personalities
-- Names should reflect international diversity
 
-Return a JSON array of exactly ${n} objects with this structure (no markdown):
-[
-  {
-    "name": "Full Name",
-    "role": "Specific title and company type (e.g. 'Senior Engineering Manager at Series B Fintech')",
-    "yearsExperience": 8,
-    "industry": "Fintech",
-    "bias": "One sentence describing their known bias or decision-making lens",
-    "perspective": "One sentence framing how they view scenarios like this"
-  }
-]`,
-    maxOutputTokens: 2000,
-  })
-
-  try {
-    const clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    const parsed = JSON.parse(clean) as PersonaProfile[]
-    return parsed.slice(0, n)
-  } catch {
+Return a JSON object {"personas": [...]} with exactly ${n} items shaped like:
+{"name":"Full Name","role":"Specific title and company type","yearsExperience":8,"industry":"Fintech","bias":"One sentence decision-making lens","perspective":"One sentence on how they view scenarios like this"}`,
+          },
+        ],
+        maxTokens: 2500,
+      },
+      z.object({ personas: PersonaProfileSchema.array().min(1) })
+    )
+    return data.personas.slice(0, n)
+  } catch (err) {
+    console.warn('[sim] persona generation failed, using generic personas:', err instanceof Error ? err.message.slice(0, 120) : 'error')
     return Array.from({ length: n }, (_, i) => ({
       name: `Persona ${i + 1}`,
-      role: profileConfig.role,
+      role: profile.role,
       yearsExperience: 5 + (i % 10),
-      industry: profileConfig.industry,
-      bias: profileConfig.bias,
+      industry: profile.industry,
+      bias: profile.bias,
       perspective: 'Evaluates based on experience and market knowledge',
     }))
   }
 }
 
-// ─── Step 2: Run a single persona ─────────────────────────────────────────
+// ─── Step 2: One call per persona (reaction + sentiment + key points) ───────
 
-export async function runPersona(
-  persona: PersonaProfile,
-  index: number,
-  scenario: string
-): Promise<PersonaResult> {
+const ReactionSchema = z.object({
+  response: z.string().min(1).max(1500),
+  sentiment: z.enum(['positive', 'neutral', 'negative', 'mixed']),
+  keyPoints: z.array(z.string().max(240)).max(5),
+})
+
+export async function runPersona(persona: PersonaProfile, index: number, scenario: string): Promise<PersonaResult> {
   const start = Date.now()
-
   try {
-    const { text: rawResponse, usage } = await generateText({
-      model: anthropic('claude-haiku-4.5'),
-      system: `You are ${persona.name}, ${persona.role}.
+    const { data, meta } = await model.generateJson(
+      {
+        systemPrompt: `You are ${persona.name}, ${persona.role}.
 You have ${persona.yearsExperience} years of experience in ${persona.industry}.
 Your perspective: ${persona.perspective}
 Your known lens/bias: ${persona.bias}
 
-Respond ONLY as this person would — authentic to their background, in first person.
-Be specific and honest. 3-5 sentences. Do not break character. Do not be generic.`,
-      prompt: `Evaluate and react to the following:\n\n${scenario}`,
-      maxOutputTokens: 400,
-    })
+Respond only as this person would: authentic to their background, first person, specific and honest, not generic. Write in the language of the scenario.`,
+        messages: [
+          {
+            role: 'user',
+            content: `React to the following scenario.
 
-    const tokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+${fence('scenario', scenario, 4000)}
 
-    const { text: structuredText } = await generateText({
-      model: anthropic('claude-haiku-4.5'),
-      system: 'Extract sentiment and key points from text. Return only valid JSON, no markdown.',
-      prompt: `Analyze this response and extract:
-1. Overall sentiment: positive | neutral | negative | mixed
-2. Key points: array of 2-3 specific points raised
-
-Response to analyze:
-"${rawResponse}"
-
-Return JSON only (no markdown):
-{"sentiment": "positive", "keyPoints": ["point 1", "point 2"]}`,
-      maxOutputTokens: 200,
-    })
-
-    let sentiment: PersonaResult['sentiment'] = 'neutral'
-    let keyPoints: string[] = []
-
-    try {
-      const clean = structuredText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-      const parsed = JSON.parse(clean)
-      sentiment = parsed.sentiment ?? 'neutral'
-      keyPoints = parsed.keyPoints ?? []
-    } catch { /* use defaults */ }
-
-    return {
-      index,
-      profile: persona,
-      response: rawResponse,
-      sentiment,
-      keyPoints,
-      tokens,
-      durationMs: Date.now() - start,
-    }
+Return JSON only:
+{"response":"3-5 sentence reaction in first person","sentiment":"positive | neutral | negative | mixed","keyPoints":["2-3 specific points you raise"]}`,
+          },
+        ],
+        maxTokens: 900,
+      },
+      ReactionSchema
+    )
+    return { index, profile: persona, ...data, tokens: meta.tokens, durationMs: Date.now() - start }
   } catch (err) {
+    // Provider and parser errors can quote the scenario, so only a generic label leaves the server.
+    console.warn(`[sim] persona ${index} failed:`, err instanceof Error ? err.message.slice(0, 120) : 'error')
     return {
-      index,
-      profile: persona,
-      response: '',
-      sentiment: 'neutral',
-      keyPoints: [],
-      tokens: 0,
-      durationMs: Date.now() - start,
-      error: String(err),
+      index, profile: persona, response: '', sentiment: 'neutral', keyPoints: [],
+      tokens: 0, durationMs: Date.now() - start, error: 'model unavailable',
     }
   }
 }
 
-// ─── Step 3: Aggregate all results ────────────────────────────────────────
+// ─── Step 3: Aggregate ──────────────────────────────────────────────────────
 
-export async function aggregateResults(
-  scenario: string,
-  results: PersonaResult[]
-): Promise<AggregationResult> {
-  const successful = results.filter(r => !r.error && r.response)
+const SynthesisSchema = z.object({
+  consensus: z.string().max(800),
+  dissent: z.string().max(600),
+  topPatterns: z.array(z.string().max(240)).max(5),
+  surprises: z.array(z.string().max(240)).max(5),
+  recommendation: z.string().max(800),
+})
 
-  const breakdown = { positive: 0, neutral: 0, negative: 0, mixed: 0 }
-  for (const r of successful) {
-    breakdown[r.sentiment] = (breakdown[r.sentiment] ?? 0) + 1
-  }
-
-  const total = successful.length || 1
+export function sentimentStats(results: PersonaResult[]) {
+  const ok = results.filter((r) => !r.error && r.response)
+  const count = { positive: 0, neutral: 0, negative: 0, mixed: 0 }
+  for (const r of ok) count[r.sentiment] += 1
+  const total = ok.length || 1
   const sentimentBreakdown = {
-    positive: Math.round((breakdown.positive / total) * 100),
-    neutral: Math.round((breakdown.neutral / total) * 100),
-    negative: Math.round((breakdown.negative / total) * 100),
-    mixed: Math.round((breakdown.mixed / total) * 100),
+    positive: Math.round((count.positive / total) * 100),
+    neutral: Math.round((count.neutral / total) * 100),
+    negative: Math.round((count.negative / total) * 100),
+    mixed: Math.round((count.mixed / total) * 100),
   }
+  // Mixed reactions count half: the score is "how much of the group leans in".
   const consensusScore = sentimentBreakdown.positive + Math.round(sentimentBreakdown.mixed / 2)
+  return { ok, sentimentBreakdown, consensusScore }
+}
 
-  const sampleResponses = successful.slice(0, 15).map((r) =>
-    `[${r.profile.role} — ${r.sentiment}]\n${r.response}`
-  ).join('\n\n---\n\n')
-
-  const { text } = await generateText({
-    model: anthropic('claude-sonnet-4.6'),
-    system: 'You are an analyst synthesizing population simulation results. Return only valid JSON, no markdown.',
-    prompt: `Synthesize these ${successful.length} responses to the following scenario.
-
-SCENARIO: ${scenario}
-
-SENTIMENT BREAKDOWN: ${sentimentBreakdown.positive}% positive, ${sentimentBreakdown.neutral}% neutral, ${sentimentBreakdown.negative}% negative, ${sentimentBreakdown.mixed}% mixed
-
-SAMPLE RESPONSES (${Math.min(15, successful.length)} of ${successful.length}):
-${sampleResponses}
-
-Return JSON only (no markdown):
-{
-  "consensus": "2-3 sentence summary of the majority view",
-  "dissent": "1-2 sentences about minority/contrarian views (if any)",
-  "topPatterns": ["recurring theme 1", "recurring theme 2", "recurring theme 3"],
-  "surprises": ["unexpected reaction or insight 1", "unexpected insight 2"],
-  "recommendation": "Concrete actionable recommendation based on this population's reaction"
-}`,
-    maxOutputTokens: 600,
-  })
-
+export async function aggregateResults(scenario: string, results: PersonaResult[]): Promise<AggregationResult & { tokens: number }> {
+  const { ok, sentimentBreakdown, consensusScore } = sentimentStats(results)
+  const samples = ok.slice(0, 12).map((r) => `[${r.profile.role} | ${r.sentiment}]\n${fence('response', r.response, 600)}`).join('\n\n')
   try {
-    const clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    const parsed = JSON.parse(clean)
+    const { data, meta } = await model.generateJson(
+      {
+        systemPrompt: 'You are an analyst synthesizing the reactions of a simulated group of people.',
+        messages: [
+          {
+            role: 'user',
+            content: `Synthesize these ${ok.length} reactions to the scenario.
+
+${fence('scenario', scenario, 4000)}
+
+SENTIMENT: ${sentimentBreakdown.positive}% positive, ${sentimentBreakdown.neutral}% neutral, ${sentimentBreakdown.negative}% negative, ${sentimentBreakdown.mixed}% mixed
+
+REACTIONS:
+${samples}
+
+Return JSON only, in the language of the scenario:
+{"consensus":"2-3 sentence summary of the majority view","dissent":"1-2 sentences on minority views","topPatterns":["3 recurring themes"],"surprises":["1-2 unexpected insights"],"recommendation":"concrete, actionable next step"}`,
+          },
+        ],
+        maxTokens: 1500,
+      },
+      SynthesisSchema
+    )
+    return { consensusScore, sentimentBreakdown, ...data, tokens: meta.tokens }
+  } catch (err) {
+    console.warn('[sim] synthesis failed:', err instanceof Error ? err.message.slice(0, 120) : 'error')
     return {
-      consensusScore,
-      sentimentBreakdown,
-      consensus: parsed.consensus ?? '',
-      dissent: parsed.dissent ?? '',
-      topPatterns: parsed.topPatterns ?? [],
-      surprises: parsed.surprises ?? [],
-      recommendation: parsed.recommendation ?? '',
-    }
-  } catch {
-    return {
-      consensusScore,
-      sentimentBreakdown,
-      consensus: `${sentimentBreakdown.positive}% of the population reacted positively.`,
-      dissent: '',
-      topPatterns: [],
-      surprises: [],
-      recommendation: 'Review individual responses for detailed insights.',
+      degraded: true, tokens: 0, consensusScore, sentimentBreakdown,
+      consensus: `${sentimentBreakdown.positive}% of the group reacted positively.`,
+      dissent: '', topPatterns: [], surprises: [],
+      recommendation: 'The written synthesis could not be generated. Read the individual reactions.',
     }
   }
 }

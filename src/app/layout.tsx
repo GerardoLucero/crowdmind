@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Persona Sim',
-  description: 'AI-powered audience simulation — test ideas against N synthetic personas',
+  title: 'Crowdmind',
+  description: 'AI focus groups in under a minute: test a CV, pitch or copy against a panel of simulated people.',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

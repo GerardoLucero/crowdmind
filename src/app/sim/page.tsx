@@ -1,18 +1,9 @@
-import { prisma } from '@/lib/db'
 import { SimClient } from './SimClient'
 
-export const dynamic = 'force-dynamic'
-
-export default async function SimPage() {
-  const recentRuns = await prisma.simRun.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 15,
-    include: { personas: { select: { sentiment: true } } },
-  })
-
+export default function SimPage() {
   return (
-    <main className="min-h-screen p-6 max-w-5xl mx-auto">
-      <SimClient recentRuns={JSON.parse(JSON.stringify(recentRuns))} />
+    <main className="min-h-screen p-6 max-w-5xl mx-auto" style={{ maxWidth: 1024, margin: '0 auto', padding: 24 }}>
+      <SimClient />
     </main>
   )
 }

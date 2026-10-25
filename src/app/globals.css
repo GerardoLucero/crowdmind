@@ -28,3 +28,16 @@ textarea, input {
 pre, code {
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
+
+.layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+@media (max-width: 800px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
