@@ -27,3 +27,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Local
+next-env.d.ts
+*.tsbuildinfo
+.vercel

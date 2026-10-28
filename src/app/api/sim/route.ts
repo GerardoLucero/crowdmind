@@ -1,157 +1,98 @@
-import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import {
-  generatePersonas,
-  runPersona,
-  aggregateResults,
-  PROFILE_PRESETS,
-} from '@/lib/sim-engine'
+import { z } from 'zod'
+import { LIMITS } from '@/lib/limits'
+import { plain } from '@/lib/fence'
+import { clientIp, rateLimit } from '@/lib/rate-limit'
+import { PROFILE_PRESETS } from '@/lib/sim-engine'
+import { runSimulation, SimUnavailableError } from '@/lib/run-sim'
 
 export const maxDuration = 120
 
-// ─── POST /api/sim ─────────────────────────────────────────────────────────
-// Invocable by:
-//   - Human user from UI (callerType: "user")
-//   - AI agents in your system (callerType: "agent", callerId: agentId)
-//
-// Body: { scenario, n, profileType, profileConfig?, callerType?, callerId? }
-// ──────────────────────────────────────────────────────────────────────────
+// Each run is 1 + N + 1 model calls, so it is capped per IP (best effort, per instance).
+const RUNS_PER_WINDOW = 6
+const WINDOW_MS = 30 * 60 * 1000
+
+const customField = z.string().trim().min(1).max(LIMITS.customField)
+const BodySchema = z.object({
+  scenario: z.string().trim().min(1, 'scenario is required').max(LIMITS.scenario, `scenario admits up to ${LIMITS.scenario} characters`),
+  n: z.number().int().optional(),
+  profileType: z.string().optional(),
+  profileConfig: z.object({ role: customField, experience: customField, industry: customField, bias: customField }).optional(),
+  callerType: z.enum(['user', 'agent']).default('user'),
+  callerId: z.string().max(60).default(''),
+  /** false returns one JSON document instead of an event stream; meant for agents. */
+  stream: z.boolean().default(true),
+})
+
+const json = (body: object, status: number, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } })
+
+const hasProvider = () => Boolean(process.env.GROQ_API_KEY || process.env.NVIDIA_NIM_API_KEY || process.env.NVIDIA_API_KEY)
 
 export async function POST(request: Request) {
-  const body = await request.json() as {
-    scenario: string
-    n?: number
-    profileType?: string
-    profileConfig?: { role: string; experience: string; industry: string; bias: string }
-    callerType?: 'user' | 'agent'
-    callerId?: string
-  }
+  const rl = rateLimit(`sim:${clientIp(request)}`, RUNS_PER_WINDOW, WINDOW_MS)
+  if (!rl.ok) return json({ error: 'Too many runs. Try again later.' }, 429, { 'Retry-After': String(rl.retryAfterSec) })
 
-  const { scenario, callerType = 'user', callerId = '' } = body
-  if (!scenario?.trim()) {
-    return NextResponse.json({ error: 'scenario is required' }, { status: 400 })
-  }
+  if (Number(request.headers.get('content-length') ?? 0) > LIMITS.maxBodyBytes) return json({ error: 'Request too large.' }, 413)
 
-  const safeN = Math.min(Math.max(body.n ?? 10, 3), 30)
-  const profileType = body.profileType ?? 'hiring-managers'
-  const profileConfig = body.profileConfig ?? PROFILE_PRESETS[profileType] ?? PROFILE_PRESETS['hiring-managers']
-
-  const simId = `sim-${Date.now()}`
-  const globalStart = Date.now()
-
-  await prisma.simRun.create({
-    data: {
-      id: simId,
-      scenario,
-      n: safeN,
-      profileType,
-      profileConfig: JSON.stringify(profileConfig),
-      status: 'running',
-      callerType,
-      callerId,
-    },
-  })
-
+  let raw: unknown
   try {
-    // Step 1 — Generate N personas in one LLM call
-    const personas = await generatePersonas(safeN, profileConfig)
-
-    // Step 2 — Run all personas in parallel
-    const settled = await Promise.allSettled(
-      personas.map((p, i) => runPersona(p, i, scenario))
-    )
-
-    const results = settled.map((r, i) =>
-      r.status === 'fulfilled'
-        ? r.value
-        : {
-            index: i,
-            profile: personas[i],
-            response: '',
-            sentiment: 'neutral' as const,
-            keyPoints: [],
-            tokens: 0,
-            durationMs: 0,
-            error: (r as PromiseRejectedResult).reason?.message ?? 'unknown error',
-          }
-    )
-
-    // Step 3 — Aggregate results
-    const successful = results.filter(r => !r.error && r.response)
-    const aggregation = await aggregateResults(scenario, successful)
-
-    await prisma.simPersona.createMany({
-      data: results.map(r => ({
-        simRunId: simId,
-        index: r.index,
-        profile: JSON.stringify(r.profile),
-        response: r.response,
-        sentiment: r.sentiment,
-        keyPoints: JSON.stringify(r.keyPoints),
-        tokens: r.tokens,
-        durationMs: r.durationMs,
-        error: r.error ?? '',
-      })),
-    })
-
-    const totalTokens = results.reduce((s, r) => s + r.tokens, 0)
-    const durationMs = Date.now() - globalStart
-
-    await prisma.simRun.update({
-      where: { id: simId },
-      data: {
-        status: 'done',
-        aggregation: JSON.stringify(aggregation),
-        totalTokens,
-        durationMs,
-      },
-    })
-
-    return NextResponse.json({
-      id: simId,
-      scenario,
-      n: safeN,
-      profileType,
-      callerType,
-      callerId,
-      aggregation,
-      personaCount: results.length,
-      successCount: successful.length,
-      totalTokens,
-      durationMs,
-    })
-  } catch (err) {
-    await prisma.simRun.update({
-      where: { id: simId },
-      data: { status: 'error', aggregation: JSON.stringify({ error: String(err) }) },
-    })
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    raw = await request.json()
+  } catch {
+    return json({ error: 'Body must be valid JSON.' }, 400)
   }
-}
+  const parsed = BodySchema.safeParse(raw)
+  if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? 'Invalid request.' }, 400)
+  const body = parsed.data
 
-// ─── GET /api/sim?id=sim-xxx ───────────────────────────────────────────────
-
-export async function GET(request: Request) {
-  const { searchParams } = await Promise.resolve(new URL(request.url))
-  const id = searchParams.get('id')
-
-  if (id) {
-    const run = await prisma.simRun.findUnique({
-      where: { id },
-      include: { personas: { orderBy: { index: 'asc' } } },
-    })
-    if (!run) return NextResponse.json({ error: 'not found' }, { status: 404 })
-    return NextResponse.json(run)
+  if (!hasProvider()) {
+    return json({ error: 'No model provider is configured on this server. Try the precomputed example.', code: 'no_provider' }, 503)
   }
 
-  const runs = await prisma.simRun.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 20,
-    select: {
-      id: true, scenario: true, n: true, profileType: true,
-      status: true, aggregation: true, callerType: true, callerId: true,
-      totalTokens: true, durationMs: true, createdAt: true,
+  const profileType = body.profileType ?? 'hiring-managers'
+  const preset = PROFILE_PRESETS[profileType]
+  if (!body.profileConfig && !preset) return json({ error: `Unknown profileType. Use one of: ${Object.keys(PROFILE_PRESETS).join(', ')}` }, 400)
+  const profile = body.profileConfig
+    ? {
+        role: plain(body.profileConfig.role, LIMITS.customField),
+        experience: plain(body.profileConfig.experience, LIMITS.customField),
+        industry: plain(body.profileConfig.industry, LIMITS.customField),
+        bias: plain(body.profileConfig.bias, LIMITS.customField),
+      }
+    : preset
+  const n = Math.min(Math.max(body.n ?? LIMITS.defaultN, LIMITS.minN), LIMITS.maxN)
+  const meta = { id: `sim-${Date.now()}`, scenario: body.scenario, n, profileType: body.profileConfig ? 'custom' : profileType, callerType: body.callerType, callerId: plain(body.callerId, 60) }
+  const params = { scenario: body.scenario, n, profile }
+
+  const failure = (err: unknown) => {
+    console.error('[sim] error', err instanceof Error ? err.message.slice(0, 200) : 'unknown')
+    return err instanceof SimUnavailableError
+      ? 'The AI providers are not answering right now. Try again in a few minutes.'
+      : 'The simulation could not be completed. Try again.'
+  }
+
+  if (!body.stream) {
+    try {
+      const summary = await runSimulation(params)
+      return json({ ...meta, ...summary }, 200)
+    } catch (err) {
+      return json({ error: failure(err) }, 503)
+    }
+  }
+
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      const emit = (data: object) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+      try {
+        emit({ type: 'start', ...meta })
+        const summary = await runSimulation(params, (event) => emit(event))
+        emit({ type: 'complete', ...meta, ...summary })
+      } catch (err) {
+        emit({ type: 'error', error: failure(err) })
+      } finally {
+        controller.close()
+      }
     },
   })
-  return NextResponse.json(runs)
+  return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
 }
